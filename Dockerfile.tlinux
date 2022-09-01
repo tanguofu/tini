@@ -1,0 +1,21 @@
+FROM mirrors.tencent.com/tlinux/tlinux3.1-minimal:latest as mydumper_builder
+
+# Envs: append /root/.bashrc instead of ENV docker cmd to make sure all envs take effect.
+ENV PIP_INDEX_URL="https://mirrors.tencent.com/pypi/simple" \
+    PIP_NO_CACHE_DIR=false \
+    PIP_TRUSTED_HOST="mirrors.tencent.com" \
+    LC_ALL=zh_CN.UTF-8 \
+    LANG=zh_CN.UTF-8 \
+    PATH=$PATH:/root/bin:/root/.local/bin:/usr/local/bin
+
+RUN dnf install -y yum && \
+    yum install -y libarchive cmake gcc gcc-c++ git make tar wget glibc-static rpm-build procps-ng
+
+ADD . /tini 
+
+RUN cd /tini && \
+    mkdir build && cd build &&  cmake .. && \
+    make && \
+    make package
+
+    

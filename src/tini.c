@@ -14,23 +14,25 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 #include "tiniConfig.h"
 #include "tiniLicense.h"
 
 #if TINI_MINIMAL
-#define PRINT_FATAL(...)                         fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
-#define PRINT_WARNING(...)  if (verbosity > 0) { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); }
-#define PRINT_INFO(...)     if (verbosity > 1) { fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
+#define PRINT_FATAL(...)                         fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n");
+#define PRINT_WARNING(...)  if (verbosity > 0) { fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n"); }
+#define PRINT_INFO(...)     if (verbosity > 1) { fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n"); }
 #define PRINT_DEBUG(...)    if (verbosity > 2) { fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
 #define PRINT_TRACE(...)    if (verbosity > 3) { fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
 #define DEFAULT_VERBOSITY 0
 #else
-#define PRINT_FATAL(...)                         fprintf(stderr, "[FATAL tini (%i)] ", getpid()); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
-#define PRINT_WARNING(...)  if (verbosity > 0) { fprintf(stderr, "[WARN  tini (%i)] ", getpid()); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); }
-#define PRINT_INFO(...)     if (verbosity > 1) { fprintf(stdout, "[INFO  tini (%i)] ", getpid()); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
-#define PRINT_DEBUG(...)    if (verbosity > 2) { fprintf(stdout, "[DEBUG tini (%i)] ", getpid()); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
-#define PRINT_TRACE(...)    if (verbosity > 3) { fprintf(stdout, "[TRACE tini (%i)] ", getpid()); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
+#define PRINT_FATAL(...)                       { fprintf(tini_stderr, "[%s FATAL tini (%i)] ", get_time(time(0)), getpid()); fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n"); fflush(tini_stderr);}
+#define PRINT_WARNING(...)  if (verbosity > 0) { fprintf(tini_stderr, "[%s WARN  tini (%i)] ", get_time(time(0)), getpid()); fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n"); fflush(tini_stderr);}
+#define PRINT_INFO(...)     if (verbosity > 1) { fprintf(tini_stderr, "[%s INFO  tini (%i)] ", get_time(time(0)), getpid()); fprintf(tini_stderr, __VA_ARGS__); fprintf(tini_stderr, "\n"); fflush(tini_stderr);}
+#define PRINT_DEBUG(...)    if (verbosity > 2) { fprintf(stdout, "[%s DEBUG tini (%i)] ", get_time(time(0)), getpid()); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
+#define PRINT_TRACE(...)    if (verbosity > 3) { fprintf(stdout, "[%s TRACE tini (%i)] ", get_time(time(0)), getpid()); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); }
 #define DEFAULT_VERBOSITY 1
 #endif
 
@@ -88,6 +90,9 @@ static unsigned int verbosity = DEFAULT_VERBOSITY;
 
 static int32_t expect_status[(STATUS_MAX - STATUS_MIN + 1) / 32];
 
+static FILE* tini_stderr;
+static unsigned int max_stdout_hang_sec =  30;
+
 #ifdef PR_SET_CHILD_SUBREAPER
 #define HAS_SUBREAPER 1
 #define OPT_STRING "p:hvwgle:s"
@@ -127,6 +132,15 @@ To fix the problem, "
 "set the environment variable " SUBREAPER_ENV_VAR " to register Tini as a child subreaper, or "
 #endif
 "run Tini as PID 1.";
+
+
+const char * get_time(time_t t) {
+	static char str[32] = {0};
+	static struct tm tm_val;
+	localtime_r(&t, &tm_val);
+	strftime(str, sizeof(str), "%Y-%m-%d %H:%M:%S", &tm_val);
+	return str;
+}
 
 int restore_signals(const signal_configuration_t* const sigconf_ptr) {
 	if (sigprocmask(SIG_SETMASK, sigconf_ptr->sigmask_ptr, NULL)) {
@@ -237,6 +251,7 @@ void print_usage(char* const name, FILE* const file) {
 
 	fprintf(file, "  --version: Show version and exit.\n");
 
+
 #if TINI_MINIMAL
 #else
 	fprintf(file, "  -h: Show this help message and exit.\n");
@@ -249,6 +264,8 @@ void print_usage(char* const name, FILE* const file) {
 	fprintf(file, "  -g: Send signals to the child's process group.\n");
 	fprintf(file, "  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).\n");
 	fprintf(file, "  -l: Show license and exit.\n");
+	fprintf(file, "  -t: Timeout (second) wait for stdout hang up, if write to stdout failed more than Timeout, then kill children process and exit.\n");
+
 #endif
 
 	fprintf(file, "\n");
@@ -339,6 +356,7 @@ int parse_args(const int argc, char* const argv[], char* (**child_args_ptr_ptr)[
 			case 'v':
 				verbosity++;
 				break;
+			
 
 			case 'w':
 				warn_on_reap++;
@@ -359,6 +377,11 @@ int parse_args(const int argc, char* const argv[], char* (**child_args_ptr_ptr)[
 			case 'l':
 				print_license(stdout);
 				*parse_fail_exitcode_ptr = 0;
+				return 1;
+
+			case 't':
+				max_stdout_hang_sec = atoi(optarg);
+				max_stdout_hang_sec = max_stdout_hang_sec < 10 ? max_stdout_hang_sec : 10;
 				return 1;
 
 			case '?':
@@ -603,8 +626,60 @@ int reap_zombies(const pid_t child_pid, int* const child_exitcode_ptr) {
 	return 0;
 }
 
+int init_tini_stderr_file(){
+	static const char * tini_err_file = "/tmp/tini.stderr";
+	tini_stderr = fopen(tini_err_file, "w");
+	
+	if (tini_stderr == NULL) {
+		fprintf(stderr, "fopen %s failed errono: %d(%s)", tini_err_file,  errno, strerror(errno));
+		return -1;
+	}
+
+	setvbuf(tini_stderr, NULL, _IONBF, 0);
+	return 0;
+}
+
+int check_stdout_hangs(){
+
+	static fd_set  write_fds;
+	static const char * errstr = "";
+	int ret, last_errno;
+
+	int flags = fcntl(STDOUT_FILENO, F_GETFL);
+	fcntl(STDOUT_FILENO, F_SETFL,  flags | O_NONBLOCK);
+
+	FD_ZERO(&write_fds);
+	FD_SET(STDOUT_FILENO, &write_fds);
+
+	struct timeval tv = {5, 0};
+	if ((ret = select(STDOUT_FILENO + 1, NULL, &write_fds, NULL,  &tv)) < 0 ) {
+		errstr = "select STDOUT_FILENO failed";
+		goto failed;
+	}
+
+	if (!FD_ISSET(STDOUT_FILENO, &write_fds)) {
+		errstr = "detect STDOUT_FILENO can't be write";
+		ret = -1;
+		goto failed;
+	}
+
+	ret = write(STDOUT_FILENO, "", 0);
+	if (ret !=0 && errno != EAGAIN ){
+		errstr = "try write STDOUT_FILENO failed";
+		goto failed;
+	}
+
+	return 0;
+
+failed:
+	last_errno = errno;
+	fcntl(STDOUT_FILENO, F_SETFL, flags&(~O_NONBLOCK));
+	PRINT_FATAL("%s ret:%d, errono: %d(%s)", errstr, ret, last_errno, strerror(last_errno));
+	return ret;
+}
 
 int main(int argc, char *argv[]) {
+	tini_stderr = stderr;
 	pid_t child_pid;
 
 	// Those are passed to functions to get an exitcode back.
@@ -654,6 +729,9 @@ int main(int argc, char *argv[]) {
 
 	/* Are we going to reap zombies properly? If not, warn. */
 	reaper_check();
+    
+	/* Write stderr to file, prevent hangs up when stderr is full */ 
+	init_tini_stderr_file();
 
 	/* Go on */
 	int spawn_ret = spawn(&child_sigconf, *child_args_ptr, &child_pid);
@@ -661,6 +739,8 @@ int main(int argc, char *argv[]) {
 		return spawn_ret;
 	}
 	free(child_args_ptr);
+
+	time_t stdout_last_ok_time = time(NULL);
 
 	while (1) {
 		/* Wait for one signal, and forward it */
@@ -676,6 +756,16 @@ int main(int argc, char *argv[]) {
 		if (child_exitcode != -1) {
 			PRINT_TRACE("Exiting: child has exited");
 			return child_exitcode;
+		}
+
+		if (check_stdout_hangs() == 0) {
+			stdout_last_ok_time = time(NULL);
+			continue;
+		}
+
+		if (time(NULL) - stdout_last_ok_time > max_stdout_hang_sec) {
+			kill(child_pid, SIGKILL);
+			PRINT_FATAL("last stdout ok at: %s, and stdout failed over %d sec, so kill children: %d and exit.", get_time(stdout_last_ok_time), max_stdout_hang_sec, child_pid);
 		}
 	}
 }
