@@ -639,26 +639,35 @@ int init_tini_stderr_file(){
 	return 0;
 }
 
-int check_stdout_hangs(){
+int check_stdout_stderr_hangs(){
 
 	static fd_set  write_fds;
 	static const char * errstr = "";
-	int ret, last_errno;
+	int ret, last_errno, stdout_flags, stderr_flags;
 
-	int flags = fcntl(STDOUT_FILENO, F_GETFL);
-	fcntl(STDOUT_FILENO, F_SETFL,  flags | O_NONBLOCK);
+	stdout_flags = fcntl(STDOUT_FILENO, F_GETFL);
+	fcntl(STDOUT_FILENO, F_SETFL,  stdout_flags | O_NONBLOCK);
+	stderr_flags = fcntl(STDOUT_FILENO, F_GETFL);
+	fcntl(STDERR_FILENO, F_SETFL,  stderr_flags | O_NONBLOCK);
 
 	FD_ZERO(&write_fds);
 	FD_SET(STDOUT_FILENO, &write_fds);
+	FD_SET(STDERR_FILENO, &write_fds);
 
 	struct timeval tv = {5, 0};
-	if ((ret = select(STDOUT_FILENO + 1, NULL, &write_fds, NULL,  &tv)) < 0 ) {
-		errstr = "select STDOUT_FILENO failed";
+	if ((ret = select(STDERR_FILENO + 1, NULL, &write_fds, NULL,  &tv)) < 0 ) {
+		errstr = "select STDOUT_FILENO STDERR_FILENO failed";
 		goto failed;
 	}
 
 	if (!FD_ISSET(STDOUT_FILENO, &write_fds)) {
 		errstr = "detect STDOUT_FILENO can't be write";
+		ret = -1;
+		goto failed;
+	}
+
+	if (!FD_ISSET(STDERR_FILENO, &write_fds)) {
+		errstr = "detect STDERR_FILENO can't be write";
 		ret = -1;
 		goto failed;
 	}
@@ -669,11 +678,18 @@ int check_stdout_hangs(){
 		goto failed;
 	}
 
+	ret = write(STDERR_FILENO, "", 0);
+	if (ret !=0 && errno != EAGAIN ){
+		errstr = "try write STDERR_FILENO failed";
+		goto failed;
+	}
+
 	return 0;
 
 failed:
 	last_errno = errno;
-	fcntl(STDOUT_FILENO, F_SETFL, flags&(~O_NONBLOCK));
+	fcntl(STDOUT_FILENO, F_SETFL, stdout_flags&(~O_NONBLOCK));
+	fcntl(STDERR_FILENO, F_SETFL, stderr_flags&(~O_NONBLOCK));
 	PRINT_FATAL("%s ret:%d, errono: %d(%s)", errstr, ret, last_errno, strerror(last_errno));
 	return ret;
 }
@@ -758,7 +774,7 @@ int main(int argc, char *argv[]) {
 			return child_exitcode;
 		}
 
-		if (check_stdout_hangs() == 0) {
+		if (check_stdout_stderr_hangs() == 0) {
 			stdout_last_ok_time = time(NULL);
 			continue;
 		}
