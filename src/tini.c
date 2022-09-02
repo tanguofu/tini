@@ -631,10 +631,11 @@ int init_tini_stderr_file(){
 	tini_stderr = fopen(tini_err_file, "w");
 	
 	if (tini_stderr == NULL) {
-		fprintf(stderr, "fopen %s failed errono: %d(%s)", tini_err_file,  errno, strerror(errno));
+		fprintf(stderr, "%s fopen %s failed errono: %d(%s)", get_time(time(0)), tini_err_file,  errno, strerror(errno));
 		return -1;
 	}
 
+	// make tini_stderr sync write
 	setvbuf(tini_stderr, NULL, _IONBF, 0);
 	return 0;
 }
@@ -646,9 +647,9 @@ int check_stdout_stderr_hangs(){
 	int ret, last_errno, stdout_flags, stderr_flags;
 
 	stdout_flags = fcntl(STDOUT_FILENO, F_GETFL);
-	fcntl(STDOUT_FILENO, F_SETFL,  stdout_flags | O_NONBLOCK);
+	fcntl(STDOUT_FILENO, F_SETFL, stdout_flags | O_NONBLOCK);
 	stderr_flags = fcntl(STDOUT_FILENO, F_GETFL);
-	fcntl(STDERR_FILENO, F_SETFL,  stderr_flags | O_NONBLOCK);
+	fcntl(STDERR_FILENO, F_SETFL, stderr_flags | O_NONBLOCK);
 
 	FD_ZERO(&write_fds);
 	FD_SET(STDOUT_FILENO, &write_fds);
@@ -657,40 +658,44 @@ int check_stdout_stderr_hangs(){
 	struct timeval tv = {5, 0};
 	if ((ret = select(STDERR_FILENO + 1, NULL, &write_fds, NULL,  &tv)) < 0 ) {
 		errstr = "select STDOUT_FILENO STDERR_FILENO failed";
-		goto failed;
+		goto exit_check;
 	}
 
 	if (!FD_ISSET(STDOUT_FILENO, &write_fds)) {
 		errstr = "detect STDOUT_FILENO can't be write";
 		ret = -1;
-		goto failed;
+		goto exit_check;
 	}
 
 	if (!FD_ISSET(STDERR_FILENO, &write_fds)) {
 		errstr = "detect STDERR_FILENO can't be write";
 		ret = -1;
-		goto failed;
+		goto exit_check;
 	}
 
 	ret = write(STDOUT_FILENO, "", 0);
 	if (ret !=0 && errno != EAGAIN ){
 		errstr = "try write STDOUT_FILENO failed";
-		goto failed;
+		goto exit_check;
 	}
 
 	ret = write(STDERR_FILENO, "", 0);
 	if (ret !=0 && errno != EAGAIN ){
 		errstr = "try write STDERR_FILENO failed";
-		goto failed;
+		goto exit_check;
 	}
 
-	return 0;
+	ret = 0;
 
-failed:
+exit_check:	
 	last_errno = errno;
 	fcntl(STDOUT_FILENO, F_SETFL, stdout_flags&(~O_NONBLOCK));
 	fcntl(STDERR_FILENO, F_SETFL, stderr_flags&(~O_NONBLOCK));
-	PRINT_FATAL("%s ret:%d, errono: %d(%s)", errstr, ret, last_errno, strerror(last_errno));
+
+	if ( ret!=0 ) {
+		PRINT_FATAL("%s ret:%d, errono: %d(%s)", errstr, ret, last_errno, strerror(last_errno));
+	}
+
 	return ret;
 }
 
