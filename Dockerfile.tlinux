@@ -1,4 +1,5 @@
-FROM mirrors.tencent.com/tlinux/tlinux3.1-minimal:latest as mydumper_builder
+ARG BUILDIMAGE 
+FROM $BUILDIMAGE as builder
 
 # Envs: append /root/.bashrc instead of ENV docker cmd to make sure all envs take effect.
 ENV PIP_INDEX_URL="https://mirrors.tencent.com/pypi/simple" \
@@ -16,6 +17,6 @@ ADD . /tini
 RUN cd /tini && \
     mkdir build && cd build &&  cmake .. && \
     make && \
-    make package
+    cp -f tini /usr/bin
 
     
